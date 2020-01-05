@@ -7,10 +7,11 @@
 -- Example renderings for:
 --
 -- > import Data.Tree
+-- > import Data.Tree.Render.Text
 -- >
 -- > tree :: Tree String
--- > tree =
--- >   Node "Add"
+-- > tree
+-- >   = Node "Add"
 -- >     [ Node "Add"
 -- >       [ Node "0" []
 -- >       , Node "Mul"
@@ -70,25 +71,33 @@ module Data.Tree.Render.Text (
   ParentLocation(..),
   ChildOrder(..),
   BranchPath(..),
+  LocalContext(..),
 
   RenderOptionsM(..),
   RenderOptions,
 
-  tracedRenderOptions,
-  tracedRenderOptionsAscii,
   renderTree,
   renderForest,
 
-  tracedRenderOptionsM,
-  tracedRenderOptionsAsciiM,
   renderTreeM,
   renderForestM,
+
+  tracedRenderOptions,
+  tracedRenderOptionsAscii,
+  zigZagRenderOptions,
+  tabbedRenderOptions,
+
+  tracedRenderOptionsM,
+  tracedRenderOptionsAsciiM,
+  zigZagRenderOptionsM,
+  tabbedRenderOptionsM,
 
 ) where
 
 import qualified Control.Monad.State.Strict as M
 import qualified Control.Monad.Writer as M
 import qualified Data.List as List
+import qualified Data.Maybe as Maybe
 import           Data.Monoid ( Endo(Endo, appEndo) )
 import qualified Data.Tree as Tree
 import           Data.Tree ( Tree, Forest )
@@ -106,8 +115,19 @@ tellDList s = M.tell $ Endo (s <>)
 -- | Describes where a parent node is rendered, relative to its children.
 data ParentLocation
   = ParentBeforeChildren
+  -- ^ Renders the before any of its children.
   | ParentAfterChildren
+  -- ^ Renders the parent after all of its children.
   | ParentBetweenChildren
+  -- ^ Renders the parent in the middle of its children (if there are multiple children).
+  -- The index is rounded down when using 'FirstToLast' and rounded up when using 'LastToFirst'.
+  | ParentAtChildIndex Int
+  -- ^ This is a value from @[0, 1, ..., length children]@ inclusive.
+  -- (Values outside this range are clamped to the closest valid value.)
+  --
+  -- A value of @0@ makes the parent rendered before any of its children
+  -- A value of @length children@ makes the parent rendered after all of its children.
+  -- Other values place the parent in the corresponding spot between its children.
   deriving (Show, Eq, Ord)
 
 -- | Describes the render order of a node's children.
@@ -140,46 +160,116 @@ data BranchPath
   -- e.g. @"  "@
   deriving (Show, Eq, Ord)
 
--- | Options used for rendering a 'Tree label'.
+-- | Local context about a node.
+data LocalContext label
+  = LocalContext
+    { lcCurrentNode :: Tree label
+    -- ^ The node assiated with this context.
+    , lcCurrentDepth :: !Int
+    -- ^ The depth of the current node.
+    , lcLitterIndex :: !Int
+    -- ^ The index of the current node with respect to its parent's children.
+    , lcLitterSize :: !Int
+    -- ^ The number of children the current node's parent has.
+    }
+
+-- | Options used for rendering a 'Tree'.
 data RenderOptionsM m string label = RenderOptions
-  { oParentLocation :: ParentLocation
+  { oParentLocation :: Maybe (LocalContext label) -> m ParentLocation
   -- ^ Controls where parent nodes are rendered.
-  , oChildOrder :: ChildOrder
+  --
+  -- A value of 'Nothing' is passed when rending the artificial root of a 'Forest'.
+  --
+  -- Simple use cases would use a constant function ignoring the local context.
+  , oChildOrder :: Maybe (LocalContext label) -> m ChildOrder
   -- ^ Controls the order a node's children are rendered.
+  --
+  -- A value of 'Nothing' is passed when rending the artificial root of a 'Forest'.
+  --
+  -- Simple use cases would use a constant function ignoring the local context.
   , oVerticalPad :: Int
   -- ^ The amount of vertical spacing between nodes.
   , oPrependNewline :: Bool
   -- ^ If 'True', a newline is prepended to the rendered output.
-  , oFromString :: String -> string
-  -- ^ Promotes a 'String' to a 'string'.
+  , oWriteNewline :: m ()
+  -- ^ Writes a newline.
   , oWrite :: string -> m ()
   -- ^ Writes a 'string'.
-  , oShowNodeLabel :: label -> string
+  , oShowNodeLabel :: Maybe label -> m string
   -- ^ Shows a 'Tree.rootLabel'.
-  , oGetNodeMarker :: label -> string
-  -- ^ Get the marker for a node. Although this takes as input a node's 'label',
-  -- this should not render the label itself.
+  -- The returned value should contain no newlines.
+  , oNodeMarker :: Maybe (LocalContext label) -> m string
+  -- ^ Get the marker for a node (without rendering its label).
   -- The returned value should contain no newlines.
   --
-  -- The label is passed as an argument to allow things such as:
+  -- 'LocalContext' is passed as an argument to allow things such as:
   --
-  --  * Rendering a node marker differently for labels that fail to pass a test.
+  --    - Rendering a node marker differently for labels that fail to pass a test.
+  --    - Highlighting a node currently being visited.
+  --    - Numbered bullets.
   --
-  --  * Highlighting a node currently being visited.
+  -- A value of 'Nothing' is passed when rending the artificial root of a 'Forest'.
   --
-  -- Simple use cases would use a constant function ignoring the label value.
-  , oForestRootMarker :: string
-  -- ^ The marker used for rendering an artificial root when rendering 'Forest's.
-  -- The returned value should contain no newlines.
+  -- Simple use cases would typically ignore the local context.
   , oShowBranchPath :: BranchPath -> string
   -- ^ Shows a 'BranchPath'. The returned value should contain no newlines and
   -- should all be of the same printed width when rendered as text.
   }
 
--- | An alias of 'RenderOptionsM' for producing pure 'String' renders.
-type RenderOptions = RenderOptionsM (M.Writer (DList Char))
+mkStringRenderOptionsM
+  :: Monad m
+  => (Bool -> String)
+  -> (BranchPath -> String)
+  -> (String -> string)
+  -> (string -> m ())
+  -> (label -> m string)
+  -> RenderOptionsM m string label
+mkStringRenderOptionsM showMarker showPath fromStr write showLabel
+  = RenderOptions
+    { oParentLocation = const loc
+    , oChildOrder = const ord
+    , oVerticalPad = 0
+    , oPrependNewline = False
+    , oWriteNewline = write newline
+    , oWrite = write
+    , oShowNodeLabel = maybe nil showLabel
+    , oNodeMarker = \case
+        Just {} -> node
+        Nothing -> root
+    , oShowBranchPath = \case
+        BranchUp       -> up
+        BranchDown     -> down
+        BranchJoin     -> join
+        BranchContinue -> continue
+        BranchEmpty    -> empty
+    }
+  where
+    loc = pure ParentBeforeChildren
+    ord = pure FirstToLast
+    nil  = pure $ fromStr ""
+    node = pure $ fromStr $ showMarker True
+    root = pure $ fromStr $ showMarker False
+    up       = fromStr $ showPath BranchUp
+    down     = fromStr $ showPath BranchDown
+    join     = fromStr $ showPath BranchJoin
+    continue = fromStr $ showPath BranchContinue
+    empty    = fromStr $ showPath BranchEmpty
+    newline  = fromStr "\n"
 
--- | Options for producing a line-traced tree using unicode drawing characters.
+unicodeMarker :: Bool -> String
+unicodeMarker = \case
+  True  -> "● "
+  False -> "●"
+
+unicodePath :: BranchPath -> String
+unicodePath = \case
+  BranchUp       -> "╭─"
+  BranchDown     -> "╰─"
+  BranchJoin     -> "├─"
+  BranchContinue -> "│ "
+  BranchEmpty    -> "  "
+
+-- | Options for rendering a line-traced tree using unicode drawing characters.
 --
 --  This uses:
 --
@@ -189,33 +279,22 @@ type RenderOptions = RenderOptionsM (M.Writer (DList Char))
 -- > BranchContinue -> "│ "
 -- > BranchEmpty    -> "  "
 --
+-- > oNodeMarker = \case
+-- >   Just {} -> "● "
+-- >   Nothing -> "●"
+--
 tracedRenderOptionsM
-  :: (String -> string)
+  :: Monad m
+  => (String -> string)
   -- ^ Promotes a 'String' to a 'string'.
   -> (string -> m ())
   -- ^ Writes a 'string'.
-  -> (label -> string)
+  -> (label -> m string)
   -- ^ Shows a 'Tree.rootLabel'.
   -> RenderOptionsM m string label
-tracedRenderOptionsM fromString' write' show' = RenderOptions
-  { oParentLocation = ParentBeforeChildren
-  , oChildOrder = FirstToLast
-  , oVerticalPad = 0
-  , oPrependNewline = False
-  , oFromString = fromString'
-  , oWrite = write'
-  , oShowNodeLabel = show'
-  , oGetNodeMarker = const $ fromString' "● "
-  , oForestRootMarker = fromString' "●"
-  , oShowBranchPath = fromString' . \case
-      BranchUp       -> "╭─"
-      BranchDown     -> "╰─"
-      BranchJoin     -> "├─"
-      BranchContinue -> "│ "
-      BranchEmpty    -> "  "
-  }
+tracedRenderOptionsM = mkStringRenderOptionsM unicodeMarker unicodePath
 
--- | Options for producing a line-traced tree using ASCII characters.
+-- | Options for rendering a line-traced tree using ASCII characters.
 --
 --  This uses:
 --
@@ -225,45 +304,110 @@ tracedRenderOptionsM fromString' write' show' = RenderOptions
 -- > BranchContinue -> "| "
 -- > BranchEmpty    -> "  "
 --
+-- > oNodeMarker = \case
+-- >   Just {} -> "o "
+-- >   Nothing -> "o"
+--
 tracedRenderOptionsAsciiM
-  :: (String -> string)
+  :: Monad m
+  => (String -> string)
   -- ^ Promotes a 'String' to a 'string'.
   -> (string -> m ())
   -- ^ Writes a 'string'.
-  -> (label -> string)
+  -> (label -> m string)
   -- ^ Shows a 'Tree.rootLabel'.
   -> RenderOptionsM m string label
-tracedRenderOptionsAsciiM fromString' write' show' =
-  (tracedRenderOptionsM fromString' write' show')
-    { oGetNodeMarker = const $ fromString' "o "
-    , oForestRootMarker = fromString' "o"
-    , oShowBranchPath = fromString' . \case
-        BranchUp       -> ",-"
-        BranchDown     -> "`-"
-        BranchJoin     -> "|-"
-        BranchContinue -> "| "
-        BranchEmpty    -> "  "
-    }
+tracedRenderOptionsAsciiM = mkStringRenderOptionsM marker path
+  where
+    marker = \case
+      True  -> "o "
+      False -> "o"
+    path = \case
+      BranchUp       -> ",-"
+      BranchDown     -> "`-"
+      BranchJoin     -> "|-"
+      BranchContinue -> "| "
+      BranchEmpty    -> "  "
 
--- | Simplified 'tracedRenderOptionsM' when using 'RenderOptions'.
+-- | A variety on 'tracedRenderOptionsM' where the path tracing is
+-- performed in a zig-zag fashion.
+zigZagRenderOptionsM
+  :: Monad m
+  => (String -> string)
+  -- ^ Promotes a 'String' to a 'string'.
+  -> (string -> m ())
+  -- ^ Writes a 'string'.
+  -> (label -> m string)
+  -- ^ Shows a 'Tree.rootLabel'.
+  -> RenderOptionsM m string label
+zigZagRenderOptionsM fromStr write showLabel = options
+  { oParentLocation = pure . \case
+      Nothing -> ParentBeforeChildren
+      Just LocalContext
+        { lcLitterIndex = index
+        , lcLitterSize  = size
+        } -> case index < (size `div` 2) of
+          True  -> ParentBeforeChildren
+          False -> ParentAfterChildren
+  }
+  where
+    options = tracedRenderOptionsM fromStr write showLabel
+
+-- | Options for rendering a tree in rows indented only by tabs.
+tabbedRenderOptionsM
+  :: Monad m
+  => String
+  -- ^ The string used for a tab.
+  -> (String -> string)
+  -- ^ Promotes a 'String' to a 'string'.
+  -> (string -> m ())
+  -- ^ Writes a 'string'.
+  -> (label -> m string)
+  -- ^ Shows a 'Tree.rootLabel'.
+  -> RenderOptionsM m string label
+tabbedRenderOptionsM tab = mkStringRenderOptionsM marker path
+  where
+    marker = const ""
+    path = const tab
+
+-- | An alias of 'RenderOptionsM' for producing pure 'String' renders.
+type RenderOptions = RenderOptionsM (M.Writer (DList Char))
+
+-- | A simplified 'tracedRenderOptionsM' specialized to @RenderOptions@.
 tracedRenderOptions
   :: (label -> String)
   -- ^ Shows a 'Tree.rootLabel'.
   -> RenderOptions String label
-tracedRenderOptions = tracedRenderOptionsM id tellDList
+tracedRenderOptions = tracedRenderOptionsM id tellDList . fmap pure
 
--- | Simplified 'tracedRenderOptionsAsciiM' when using 'RenderOptions'.
+-- | A simplified 'tabbedRenderOptionsM' specialized to @RenderOptions@.
+tabbedRenderOptions
+  :: String
+  -- ^ The string used for a tab.
+  -> (label -> String)
+  -- ^ Shows a 'Tree.rootLabel'.
+  -> RenderOptions String label
+tabbedRenderOptions tab = tabbedRenderOptionsM tab id tellDList . fmap pure
+
+-- | A simplified 'zigZagRenderOptionsM' specialized to @RenderOptions@.
+zigZagRenderOptions
+  :: (label -> String)
+  -- ^ Shows a 'Tree.rootLabel'.
+  -> RenderOptions String label
+zigZagRenderOptions = zigZagRenderOptionsM id tellDList . fmap pure
+
+-- | A simplified 'tracedRenderOptionsAsciiM' specialized to @RenderOptions@.
 tracedRenderOptionsAscii
   :: (label -> String)
   -- ^ Shows a 'Tree.rootLabel'.
   -> RenderOptions String label
-tracedRenderOptionsAscii = tracedRenderOptionsAsciiM id tellDList
+tracedRenderOptionsAscii = tracedRenderOptionsAsciiM id tellDList . fmap pure
 
--- | Renders a 'Tree' a pretty printed tree as a 'String'.
+-- | Renders a 'Tree' to a 'String'.
 renderTree :: RenderOptions String label -> Tree label -> String
 renderTree options = runDListWriter . renderTreeM options
 
--- | Renders a 'Forest' a pretty printed tree as a 'String'.
+-- | Renders a 'Forest' to a 'String'.
 renderForest :: RenderOptions String label -> Forest label -> String
 renderForest options = runDListWriter . renderForestM options
 
@@ -271,106 +415,140 @@ renderForest options = runDListWriter . renderForestM options
 renderTreeM :: Monad m => RenderOptionsM m string label -> Tree label -> m ()
 renderTreeM options tree = M.evalStateT action options
   where
-    action = render [] tree
+    action = render lc []
+    lc = LocalContext
+      { lcCurrentNode = tree
+      , lcCurrentDepth = 0
+      , lcLitterIndex = 0
+      , lcLitterSize = 1
+      }
+
+catMaybes :: Tree (Maybe label) -> Maybe (Tree label)
+catMaybes = \case
+  Tree.Node
+    { Tree.rootLabel = mLabel
+    , Tree.subForest = kids
+    } -> case mLabel of
+      Nothing -> Nothing
+      Just label -> Just Tree.Node
+        { Tree.rootLabel = label
+        , Tree.subForest = Maybe.mapMaybe catMaybes kids
+        }
 
 -- | Renders a pretty printed 'Forest' within a monadic context.
 renderForestM :: Monad m => RenderOptionsM m string label -> Forest label -> m ()
 renderForestM options trees = do
   let forestTree = Tree.Node Nothing $ map (fmap Just) trees
+  let flattenLc = \case
+            Nothing -> Nothing
+            Just lc ->
+              let node = lcCurrentNode lc
+              in case catMaybes node of
+                Nothing -> Nothing
+                Just node' -> Just lc { lcCurrentNode = node' }
   let options' = options
-        { oShowNodeLabel = maybe (oFromString options "") $ oShowNodeLabel options
-        , oGetNodeMarker = maybe (oForestRootMarker options) $ oGetNodeMarker options
+        { oShowNodeLabel = oShowNodeLabel options . maybe Nothing id
+        , oParentLocation = oParentLocation options . flattenLc
+        , oChildOrder     = oChildOrder     options . flattenLc
+        , oNodeMarker     = oNodeMarker     options . flattenLc
         }
   renderTreeM options' forestTree
 
 type Render string label m = M.StateT (RenderOptionsM m string label) m
 
-write :: Monad m => string -> Render string label m ()
-write s = do
+renderString :: Monad m => string -> Render string label m ()
+renderString s = do
   w <- M.gets oWrite
   M.lift $ w s
 
-render :: Monad m => [BranchPath] -> Tree label -> Render string label m ()
-render trail = \case
+writeNewline :: Monad m => Render string label m ()
+writeNewline = M.gets oWriteNewline >>= M.lift
+
+render :: Monad m => LocalContext label -> [BranchPath] -> Render string label m ()
+render lc trail = case lcCurrentNode lc of
   Tree.Node
     { Tree.rootLabel = label
     , Tree.subForest = kids'
     } -> do
 
+      parentLoc <- M.gets (flip oParentLocation $ Just lc) >>= M.lift
+      childOrder <- M.gets (flip oChildOrder $ Just lc) >>= M.lift
+
       let renderCurr = do
-            getMarker <- M.gets oGetNodeMarker
-            showLabel <- M.gets oShowNodeLabel
             M.gets oPrependNewline >>= \case
-              True  -> renderNewline
+              True  -> writeNewline
               False -> M.modify' $ \st -> st
                 { oPrependNewline = True
                 }
             renderTrail trail
-            write $ getMarker label
-            write $ showLabel label
+            marker <- M.gets (flip oNodeMarker $ Just lc) >>= M.lift
+            renderString marker
+            shownLabel <- M.gets (flip oShowNodeLabel $ Just label) >>= M.lift
+            renderString shownLabel
 
-      childOrder <- M.gets oChildOrder
-      let kids = case childOrder of
-            FirstToLast -> kids'
-            LastToFirst -> reverse kids'
+      let kidCount = length kids'
+      let kids =
+            let f = case childOrder of
+                  FirstToLast -> id
+                  LastToFirst -> reverse
+            in flip map (f $ zip kids' [0..]) $ \(kid, idx) -> LocalContext
+              { lcCurrentNode = kid
+              , lcCurrentDepth = lcCurrentDepth lc + 1
+              , lcLitterIndex = idx
+              , lcLitterSize = kidCount
+              }
 
-      M.gets oParentLocation >>= \case
+      let trailL = case trail of
+            BranchDown : rest -> BranchContinue : rest
+            _ -> trail
+          trailR = case trail of
+            BranchUp : rest -> BranchContinue : rest
+            _ -> trail
+          renderNextL path lc' = render lc' (path : trailL)
+          renderNextR path lc' = render lc' (path : trailR)
 
-        ParentBeforeChildren -> do
-          let renderNext path = render $ path : trail
+      let index = case parentLoc of
+            ParentBeforeChildren -> 0
+            ParentAfterChildren -> kidCount
+            ParentBetweenChildren -> case childOrder of
+              FirstToLast -> kidCount `div` 2
+              LastToFirst -> case kidCount `divMod` 2 of
+                (d, 0) -> d
+                (d, _) -> d + 1
+            ParentAtChildIndex i -> max 0 $ min kidCount i
+
+      case (index == 0, index == kidCount) of
+
+        (True, _ ) -> do
           case initLast kids of
             Nothing -> do
               renderCurr
             Just (ks, k) -> do
               renderCurr
               M.forM_ ks $ \k' -> do
-                renderVerticalSpace trail
-                renderNext BranchJoin k'
-              renderVerticalSpace trail
-              renderNext BranchDown k
+                renderVerticalSpace trailR
+                renderNextR BranchJoin k'
+              renderVerticalSpace trailR
+              renderNextR BranchDown k
 
-        ParentAfterChildren -> do
-          let renderNext path = render $ path : trail
+        ( _, True) -> do
           case kids of
             [] -> do
               renderCurr
             k : ks -> do
-              renderNext BranchUp k
+              renderNextL BranchUp k
               M.forM_ ks $ \k' -> do
-                renderVerticalSpace trail
-                renderNext BranchJoin k'
-              renderVerticalSpace trail
+                renderVerticalSpace trailL
+                renderNextL BranchJoin k'
+              renderVerticalSpace trailL
               renderCurr
 
-        ParentBetweenChildren -> do
-          let trailL = case trail of
-                BranchDown : rest -> BranchContinue : rest
-                _ -> trail
-              trailR = case trail of
-                BranchUp : rest -> BranchContinue : rest
-                _ -> trail
-              renderNextL path = render $ path : trailL
-              renderNextR path = render $ path : trailR
+        ( _ , _ ) -> do
           case headMiddleLast kids of
-            Nothing -> do
-              renderCurr
-            Just (k, Nothing) -> do
-              case childOrder of
-                FirstToLast -> do
-                  renderCurr
-                  renderVerticalSpace trailR
-                  renderNextR BranchDown k
-                LastToFirst -> do
-                  renderNextL BranchUp k
-                  renderVerticalSpace trailL
-                  renderCurr
+            Nothing -> undefined -- This can't happen.
+            Just (_, Nothing) -> undefined -- This can't happen.
             Just (k0, Just (ks, kn)) -> do
-              let index = case childOrder of
-                    FirstToLast -> length ks `div` 2
-                    LastToFirst -> case length ks `divMod` 2 of
-                      (d, 0) -> d
-                      (d, _) -> d + 1
-              let (ksL, ksR) = List.splitAt index ks
+              let (ksL, ksR) = List.splitAt (index - 1) ks
               renderNextL BranchUp k0
               M.forM_ ksL $ \k -> do
                 renderVerticalSpace trailL
@@ -383,22 +561,17 @@ render trail = \case
               renderVerticalSpace trailR
               renderNextR BranchDown kn
 
-renderNewline :: Monad m => Render string label m ()
-renderNewline = do
-  from <- M.gets oFromString
-  write $ from "\n"
-
 renderVerticalSpace :: Monad m => [BranchPath] -> Render string label m ()
 renderVerticalSpace trail = do
   n <- M.gets oVerticalPad
   M.replicateM_ n $ do
-    renderNewline
+    writeNewline
     renderTrail $ BranchContinue : trail
 
 renderTrail :: Monad m => [BranchPath] -> Render string label m ()
 renderTrail trail = do
   showPath <- M.gets oShowBranchPath
-  let renderPath = write . showPath
+  let renderPath = renderString . showPath
   case trail of
     [] -> pure ()
     p : ps -> do
@@ -407,7 +580,7 @@ renderTrail trail = do
         BranchUp    -> BranchEmpty
         BranchEmpty -> BranchEmpty
         _ -> BranchContinue
-      write $ showPath p
+      renderString $ showPath p
 
 initLast :: [a] -> Maybe ([a], a)
 initLast = \case

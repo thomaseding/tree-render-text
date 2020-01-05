@@ -64,23 +64,26 @@
 -- > │ ╭─● Max         ├─● Var     │ ├─● 2     │ ├─● 0       │ │ ╰─● 1
 -- > ├─● Neg           │ ╰─● x     │ ╰─● 1     ├─● Add       ╰─● Add
 -- > ● Add             ╰─● 6       ╰─● 0       ● Add           ╰─● 0
-
+--
 module Data.Tree.Render.Text (
+
   ParentLocation(..),
   ChildOrder(..),
   BranchPath(..),
 
-  renderTreeM,
-  renderForestM,
   RenderOptionsM(..),
-  tracedRenderOptionsM,
-  tracedRenderOptionsAsciiM,
-
-  renderTree,
-  renderForest,
   RenderOptions,
+
   tracedRenderOptions,
   tracedRenderOptionsAscii,
+  renderTree,
+  renderForest,
+
+  tracedRenderOptionsM,
+  tracedRenderOptionsAsciiM,
+  renderTreeM,
+  renderForestM,
+
 ) where
 
 import qualified Control.Monad.State.Strict as M
@@ -145,7 +148,7 @@ data RenderOptionsM m string label = RenderOptions
   -- ^ Controls the order a node's children are rendered.
   , oVerticalPad :: Int
   -- ^ The amount of vertical spacing between nodes.
-  , oPrependNewLine :: Bool
+  , oPrependNewline :: Bool
   -- ^ If 'True', a newline is prepended to the rendered output.
   , oFromString :: String -> string
   -- ^ Promotes a 'String' to a 'string'.
@@ -156,6 +159,7 @@ data RenderOptionsM m string label = RenderOptions
   , oGetNodeMarker :: label -> string
   -- ^ Get the marker for a node. Although this takes as input a node's 'label',
   -- this should not render the label itself.
+  -- The returned value should contain no newlines.
   --
   -- The label is passed as an argument to allow things such as:
   --
@@ -165,9 +169,10 @@ data RenderOptionsM m string label = RenderOptions
   --
   -- Simple use cases would use a constant function ignoring the label value.
   , oForestRootMarker :: string
-  -- ^ The marker usef for rendering an artificial root when rendering 'Forest's.
+  -- ^ The marker used for rendering an artificial root when rendering 'Forest's.
+  -- The returned value should contain no newlines.
   , oShowBranchPath :: BranchPath -> string
-  -- ^ Shows a 'BranchPath'. The returned values should contain no newlines and
+  -- ^ Shows a 'BranchPath'. The returned value should contain no newlines and
   -- should all be of the same printed width when rendered as text.
   }
 
@@ -196,7 +201,7 @@ tracedRenderOptionsM fromString' write' show' = RenderOptions
   { oParentLocation = ParentBeforeChildren
   , oChildOrder = FirstToLast
   , oVerticalPad = 0
-  , oPrependNewLine = False
+  , oPrependNewline = False
   , oFromString = fromString'
   , oWrite = write'
   , oShowNodeLabel = show'
@@ -295,10 +300,10 @@ render trail = \case
       let renderCurr = do
             getMarker <- M.gets oGetNodeMarker
             showLabel <- M.gets oShowNodeLabel
-            M.gets oPrependNewLine >>= \case
-              True  -> renderNewLine
+            M.gets oPrependNewline >>= \case
+              True  -> renderNewline
               False -> M.modify' $ \st -> st
-                { oPrependNewLine = True
+                { oPrependNewline = True
                 }
             renderTrail trail
             write $ getMarker label
@@ -378,8 +383,8 @@ render trail = \case
               renderVerticalSpace trailR
               renderNextR BranchDown kn
 
-renderNewLine :: Monad m => Render string label m ()
-renderNewLine = do
+renderNewline :: Monad m => Render string label m ()
+renderNewline = do
   from <- M.gets oFromString
   write $ from "\n"
 
@@ -387,7 +392,7 @@ renderVerticalSpace :: Monad m => [BranchPath] -> Render string label m ()
 renderVerticalSpace trail = do
   n <- M.gets oVerticalPad
   M.replicateM_ n $ do
-    renderNewLine
+    renderNewline
     renderTrail $ BranchContinue : trail
 
 renderTrail :: Monad m => [BranchPath] -> Render string label m ()

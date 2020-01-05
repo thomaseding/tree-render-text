@@ -3,6 +3,7 @@
 
 module Data.Tree.Render.TextTest (
   test1,
+  test2,
 ) where
 
 import qualified Data.Tree as Tree
@@ -44,6 +45,18 @@ test1 = do
   let b0 = renderFlavors options
   let b1 = renderFlavors options { R.oVerticalPad = 1 }
   Box.printBox $ vsep [b0, b1]
+  putStrLn ""
+
+test2 :: IO ()
+test2 = do
+  let options = (R.tracedRenderOptions id)
+        { R.oChildOrder = R.LastToFirst
+        , R.oParentLocation = R.ParentBetweenChildren
+        }
+  let forest = [testTree1, testTree1]
+  putStrLn ""
+  let f1 = R.renderForest options forest
+  putStrLn f1
   putStrLn ""
 
 testTree1 :: Tree String

@@ -3,17 +3,81 @@
 {-# LANGUAGE Safe #-}
 
 -- | Configurable text rendering of trees.
+--
+-- Example renderings for:
+--
+-- > import Data.Tree
+-- >
+-- > tree :: Tree String
+-- > tree =
+-- >   Node "Add"
+-- >     [ Node "Add"
+-- >       [ Node "0" []
+-- >       , Node "Mul"
+-- >         [ Node "1" []
+-- >         , Node "2" []
+-- >         ]
+-- >       ]
+-- >     , Node "Neg"
+-- >       [ Node "Max"
+-- >         [ Node "3" []
+-- >         , Node "4" []
+-- >         , Node "5" []
+-- >         , Node "Var"
+-- >           [ Node "x" []
+-- >           ]
+-- >         , Node "6" []
+-- >         ]
+-- >       ]
+-- >     ]
+-- >
+-- > renderTree (tracedRenderOptions id) tree
+-- >
+-- > ● Add
+-- > ├─● Add
+-- > │ ├─● 0
+-- > │ ╰─● Mul
+-- > │   ├─● 1
+-- > │   ╰─● 2
+-- > ╰─● Neg
+-- >   ╰─● Max
+-- >     ├─● 3
+-- >     ├─● 4
+-- >     ├─● 5
+-- >     ├─● Var
+-- >     │ ╰─● x
+-- >     ╰─● 6
+-- >
+-- > Other renderings by setting 'ParentLocation' and 'ChildOrder' in the options:
+-- >
+-- >   ╭─● 0         ╭─● 0       ● Add             ╭─● 6         ╭─● 6
+-- >   │ ╭─● 1     ╭─● Add       ├─● Neg           │ ╭─● x       │ ╭─● x
+-- >   │ ├─● 2     │ │ ╭─● 1     │ ╰─● Max         ├─● Var       ├─● Var
+-- >   ├─● Mul     │ ╰─● Mul     │   ├─● 6         ├─● 5         ├─● 5
+-- > ╭─● Add       │   ╰─● 2     │   ├─● Var       ├─● 4       ╭─● Max
+-- > │   ╭─● 3     ● Add         │   │ ╰─● x       ├─● 3       │ ├─● 4
+-- > │   ├─● 4     ╰─● Neg       │   ├─● 5       ╭─● Max       │ ╰─● 3
+-- > │   ├─● 5       │ ╭─● 3     │   ├─● 4     ╭─● Neg       ╭─● Neg
+-- > │   │ ╭─● x     │ ├─● 4     │   ╰─● 3     │   ╭─● 2     ● Add
+-- > │   ├─● Var     ╰─● Max     ╰─● Add       │   ├─● 1     │   ╭─● 2
+-- > │   ├─● 6         ├─● 5       ├─● Mul     │ ╭─● Mul     │ ╭─● Mul
+-- > │ ╭─● Max         ├─● Var     │ ├─● 2     │ ├─● 0       │ │ ╰─● 1
+-- > ├─● Neg           │ ╰─● x     │ ╰─● 1     ├─● Add       ╰─● Add
+-- > ● Add             ╰─● 6       ╰─● 0       ● Add           ╰─● 0
+
 module Data.Tree.Render.Text (
   ParentLocation(..),
   ChildOrder(..),
   BranchPath(..),
 
   renderTreeM,
+  renderForestM,
   RenderOptionsM(..),
   tracedRenderOptionsM,
   tracedRenderOptionsAsciiM,
 
   renderTree,
+  renderForest,
   RenderOptions,
   tracedRenderOptions,
   tracedRenderOptionsAscii,
@@ -24,10 +88,13 @@ import qualified Control.Monad.Writer as M
 import qualified Data.List as List
 import           Data.Monoid ( Endo(Endo, appEndo) )
 import qualified Data.Tree as Tree
-import           Data.Tree ( Tree )
+import           Data.Tree ( Tree, Forest )
 
 -- | A difference list on typ 'a'.
 type DList a = Endo [a]
+
+runDListWriter :: M.Writer (DList a) () -> [a]
+runDListWriter = ($ []) . appEndo . M.execWriter
 
 -- | Appends a list '[a]' to the output of a 'M.Writer (DList a)'.
 tellDList :: [a] -> M.Writer (DList a) ()
@@ -51,23 +118,23 @@ data BranchPath
   = BranchUp
   -- ^ Describes a turn going up toward the left.
   --
-  -- e.g. @╭─@
+  -- e.g. @"╭─"@
   | BranchDown
   -- ^ Describes a turn going down toward the left.
   --
-  -- e.g. @╰─@
+  -- e.g. @"╰─"@
   | BranchJoin
   -- ^ Describes a T-join of a path going up and down toward the left.
   --
-  -- e.g. @├─@
+  -- e.g. @"├─"@
   | BranchContinue
   -- ^ Describes a path going up and down.
   --
-  -- e.g. @│ @
+  -- e.g. @"│ "@
   | BranchEmpty
   -- ^ Describes a part that does NOT contain a path piece.
   --
-  -- e.g. @  @
+  -- e.g. @"  "@
   deriving (Show, Eq, Ord)
 
 -- | Options used for rendering a 'Tree label'.
@@ -91,10 +158,14 @@ data RenderOptionsM m string label = RenderOptions
   -- this should not render the label itself.
   --
   -- The label is passed as an argument to allow things such as:
+  --
   --  * Rendering a node marker differently for labels that fail to pass a test.
+  --
   --  * Highlighting a node currently being visited.
   --
   -- Simple use cases would use a constant function ignoring the label value.
+  , oForestRootMarker :: string
+  -- ^ The marker usef for rendering an artificial root when rendering 'Forest's.
   , oShowBranchPath :: BranchPath -> string
   -- ^ Shows a 'BranchPath'. The returned values should contain no newlines and
   -- should all be of the same printed width when rendered as text.
@@ -106,11 +177,12 @@ type RenderOptions = RenderOptionsM (M.Writer (DList Char))
 -- | Options for producing a line-traced tree using unicode drawing characters.
 --
 --  This uses:
---      BranchUp       -> "╭─"
---      BranchDown     -> "╰─"
---      BranchJoin     -> "├─"
---      BranchContinue -> "│ "
---      BranchEmpty    -> "  "
+--
+-- > BranchUp       -> "╭─"
+-- > BranchDown     -> "╰─"
+-- > BranchJoin     -> "├─"
+-- > BranchContinue -> "│ "
+-- > BranchEmpty    -> "  "
 --
 tracedRenderOptionsM
   :: (String -> string)
@@ -129,6 +201,7 @@ tracedRenderOptionsM fromString' write' show' = RenderOptions
   , oWrite = write'
   , oShowNodeLabel = show'
   , oGetNodeMarker = const $ fromString' "● "
+  , oForestRootMarker = fromString' "●"
   , oShowBranchPath = fromString' . \case
       BranchUp       -> "╭─"
       BranchDown     -> "╰─"
@@ -140,11 +213,12 @@ tracedRenderOptionsM fromString' write' show' = RenderOptions
 -- | Options for producing a line-traced tree using ASCII characters.
 --
 --  This uses:
---        BranchUp       -> ",-"
---        BranchDown     -> "`-"
---        BranchJoin     -> "|-"
---        BranchContinue -> "| "
---        BranchEmpty    -> "  "
+--
+-- > BranchUp       -> ",-"
+-- > BranchDown     -> "`-"
+-- > BranchJoin     -> "|-"
+-- > BranchContinue -> "| "
+-- > BranchEmpty    -> "  "
 --
 tracedRenderOptionsAsciiM
   :: (String -> string)
@@ -157,6 +231,7 @@ tracedRenderOptionsAsciiM
 tracedRenderOptionsAsciiM fromString' write' show' =
   (tracedRenderOptionsM fromString' write' show')
     { oGetNodeMarker = const $ fromString' "o "
+    , oForestRootMarker = fromString' "o"
     , oShowBranchPath = fromString' . \case
         BranchUp       -> ",-"
         BranchDown     -> "`-"
@@ -179,17 +254,29 @@ tracedRenderOptionsAscii
   -> RenderOptions String label
 tracedRenderOptionsAscii = tracedRenderOptionsAsciiM id tellDList
 
--- | Renders a 'Tree' a pretty printed tree asa a 'String'.
+-- | Renders a 'Tree' a pretty printed tree as a 'String'.
 renderTree :: RenderOptions String label -> Tree label -> String
-renderTree options = run . renderTreeM options
-  where
-    run = ($ "") . appEndo . M.execWriter
+renderTree options = runDListWriter . renderTreeM options
 
--- | Renders a pretty printed tree within a monadic context.
+-- | Renders a 'Forest' a pretty printed tree as a 'String'.
+renderForest :: RenderOptions String label -> Forest label -> String
+renderForest options = runDListWriter . renderForestM options
+
+-- | Renders a pretty printed 'Tree' within a monadic context.
 renderTreeM :: Monad m => RenderOptionsM m string label -> Tree label -> m ()
 renderTreeM options tree = M.evalStateT action options
   where
     action = render [] tree
+
+-- | Renders a pretty printed 'Forest' within a monadic context.
+renderForestM :: Monad m => RenderOptionsM m string label -> Forest label -> m ()
+renderForestM options trees = do
+  let forestTree = Tree.Node Nothing $ map (fmap Just) trees
+  let options' = options
+        { oShowNodeLabel = maybe (oFromString options "") $ oShowNodeLabel options
+        , oGetNodeMarker = maybe (oForestRootMarker options) $ oGetNodeMarker options
+        }
+  renderTreeM options' forestTree
 
 type Render string label m = M.StateT (RenderOptionsM m string label) m
 

@@ -84,11 +84,13 @@ module Data.Tree.Render.Text (
 
   tracedRenderOptions,
   tracedRenderOptionsAscii,
+  middleCutRenderOptions,
   zigZagRenderOptions,
   tabbedRenderOptions,
 
   tracedRenderOptionsM,
   tracedRenderOptionsAsciiM,
+  middleCutRenderOptionsM,
   zigZagRenderOptionsM,
   tabbedRenderOptionsM,
 
@@ -115,7 +117,7 @@ tellDList s = M.tell $ Endo (s <>)
 -- | Describes where a parent node is rendered, relative to its children.
 data ParentLocation
   = ParentBeforeChildren
-  -- ^ Renders the before any of its children.
+  -- ^ Renders the parent before any of its children.
   | ParentAfterChildren
   -- ^ Renders the parent after all of its children.
   | ParentBetweenChildren
@@ -330,6 +332,31 @@ tracedRenderOptionsAsciiM = mkStringRenderOptionsM marker path
       BranchEmpty    -> "  "
 
 -- | A variety on 'tracedRenderOptionsM' where the path tracing is
+-- performed in a zig-zag-like fashion such that there is a cut down
+-- the middle of a node's children.
+middleCutRenderOptionsM
+  :: Monad m
+  => (String -> string)
+  -- ^ Promotes a 'String' to a 'string'.
+  -> (string -> m ())
+  -- ^ Writes a 'string'.
+  -> (label -> m string)
+  -- ^ Shows a 'Tree.rootLabel'.
+  -> RenderOptionsM m string label
+middleCutRenderOptionsM fromStr write showLabel = options
+  { oParentLocation = pure . \case
+      Nothing -> ParentBeforeChildren
+      Just LocalContext
+        { lcLitterIndex = index
+        , lcLitterSize  = size
+        } -> case index < (size `div` 2) of
+          True  -> ParentBeforeChildren
+          False -> ParentAfterChildren
+  }
+  where
+    options = tracedRenderOptionsM fromStr write showLabel
+
+-- | A variety on 'tracedRenderOptionsM' where the path tracing is
 -- performed in a zig-zag fashion.
 zigZagRenderOptionsM
   :: Monad m
@@ -344,11 +371,10 @@ zigZagRenderOptionsM fromStr write showLabel = options
   { oParentLocation = pure . \case
       Nothing -> ParentBeforeChildren
       Just LocalContext
-        { lcLitterIndex = index
-        , lcLitterSize  = size
-        } -> case index < (size `div` 2) of
-          True  -> ParentBeforeChildren
-          False -> ParentAfterChildren
+        { lcCurrentDepth = depth
+        } -> case depth `mod` 2 of
+          0 -> ParentBeforeChildren
+          _ -> ParentAfterChildren
   }
   where
     options = tracedRenderOptionsM fromStr write showLabel
@@ -388,6 +414,13 @@ tabbedRenderOptions
   -- ^ Shows a 'Tree.rootLabel'.
   -> RenderOptions String label
 tabbedRenderOptions tab = tabbedRenderOptionsM tab id tellDList . fmap pure
+
+-- | A simplified 'middleCutRenderOptionsM' specialized to @RenderOptions@.
+middleCutRenderOptions
+  :: (label -> String)
+  -- ^ Shows a 'Tree.rootLabel'.
+  -> RenderOptions String label
+middleCutRenderOptions = middleCutRenderOptionsM id tellDList . fmap pure
 
 -- | A simplified 'zigZagRenderOptionsM' specialized to @RenderOptions@.
 zigZagRenderOptions

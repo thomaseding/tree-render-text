@@ -25,7 +25,7 @@ hsep = Box.hsep 3 Box.left
 renderFlavors :: R.RenderOptions String String -> Box
 renderFlavors options =
   let go ord loc =
-        let str = flip R.renderTree testTree1 options
+        let str = flip R.renderTree tree1 options
               { R.oChildOrder = const $ pure ord
               , R.oParentLocation = const $ pure loc
               }
@@ -44,37 +44,41 @@ renderFlavors options =
 test1 :: IO ()
 test1 = do
   let options = R.tracedRenderOptions id
-  putStrLn ""
   let b0 = renderFlavors options
   let b1 = renderFlavors options { R.oVerticalPad = 1 }
+  putStrLn ""
   Box.printBox $ vsep [b0, b1]
   putStrLn ""
 
 test2 :: IO ()
 test2 = do
-  let tree = testTree1
+  let tree = tree1
   let options = (R.tracedRenderOptions id)
         { R.oChildOrder = const $ pure R.LastToFirst
         , R.oParentLocation = const $ pure R.ParentBetweenChildren
         }
-  putStrLn ""
   let f0 = R.renderForest options []
   let f1 = R.renderForest options [tree]
   let f2 = R.renderForest options [tree, tree]
+  putStrLn ""
   Box.printBox $ hsep $ map naturalBox [f0, f1, f2]
   putStrLn ""
 
 test3 :: IO ()
 test3 = do
-  let tree = testTree2
-  let options = (R.zigZagRenderOptions id)
+  let options1 = (R.middleCutRenderOptions id)
+  let options2 = (R.zigZagRenderOptions id)
+  let mkBox options =
+        let f2 = R.renderForest options [tree2]
+            f3 = R.renderForest options [tree3]
+            f4 = R.renderForest options [tree4]
+        in hsep $ map naturalBox [f2, f3, f4]
   putStrLn ""
-  let f1 = R.renderForest options [tree]
-  Box.printBox $ hsep $ map naturalBox [f1]
+  Box.printBox $ hsep $ map mkBox [options1, options2]
   putStrLn ""
 
-testTree1 :: Tree String
-testTree1
+tree1 :: Tree String
+tree1
   = node "Add"
     [ node "Add"
       [ node "0" []
@@ -100,13 +104,13 @@ testTree1
     node :: String -> [Tree String] -> Tree String
     node = Tree.Node
 
-testTree2 :: Tree String
-testTree2
+tree2 :: Tree String
+tree2
   = node "Add"
     [ node "Add"
       [ node "a" []
       , node "Mul"
-        [ node "b" [testTree1]
+        [ node "b" [tree1]
         , node "c" []
         ]
       ]
@@ -116,7 +120,7 @@ testTree2
         , node "e" []
         , node "f" []
         , node "Var"
-          [ node "x" [testTree1]
+          [ node "x" [tree1]
           ]
         , node "g" []
         ]
@@ -126,4 +130,28 @@ testTree2
   where
     node :: String -> [Tree String] -> Tree String
     node = Tree.Node
+
+treeNat :: Int -> Tree Int
+treeNat n = iterate s z !! n
+  where
+    z :: Tree Int
+    z = Tree.Node 0 []
+
+    s :: Tree Int -> Tree Int
+    s t = Tree.Node (1 + Tree.rootLabel t) [t]
+
+treePow2 :: Int -> Tree Int
+treePow2 n = iterate f z !! n
+  where
+    z :: Tree Int
+    z = Tree.Node 1 []
+
+    f :: Tree Int -> Tree Int
+    f t = Tree.Node (2 * Tree.rootLabel t) [t, t]
+
+tree3 :: Tree String
+tree3 = fmap show $ treeNat 10
+
+tree4 :: Tree String
+tree4 = fmap show $ treePow2 4
 

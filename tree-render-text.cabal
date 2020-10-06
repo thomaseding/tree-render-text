@@ -4,7 +4,7 @@ cabal-version:       2.4
 -- http://haskell.org/cabal/users-guide/
 
 name:                tree-render-text
-version:             0.4.0.0
+version:             0.4.1.0
 synopsis:            Configurable text rendering of trees.
 description:         Configurable text rendering of trees.
 homepage:            https://github.com/thomaseding/tree-render-text
@@ -21,6 +21,6 @@ library
   exposed-modules:     Data.Tree.Render.Text
   other-modules:       Data.Tree.Render.TextTest
   other-extensions:    FlexibleContexts, LambdaCase, Safe
-  build-depends:       base ^>=4.12.0.0, mtl ^>=2.2.2, containers ^>=0.6.0.1, boxes ^>=0.1.5
+  build-depends:       base >=4.12.0.0 && < 4.15.0.0, mtl ^>=2.2.2, containers ^>=0.6.0.1, boxes ^>=0.1.5
   hs-source-dirs:      src
   default-language:    Haskell2010
